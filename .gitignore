@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Siemens NX / Teamcenter Output & Logs
+*.syslog
+*.log
+*.bak
+*.prt.bak
+*.undo_metadata*
+
+# Runtime Excel Exports & Automatic Backups
+# (Keeps repository clean from user-specific local BOM exports)
+NX_BOM_Staircase_Master*.xls
+*_20[0-9][0-9][0-9][0-9][0-9][0-9]_*.xls
+
+# Temporary Excel Files
+~$*
+*.tmp
+
+# Operating System
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE / Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
