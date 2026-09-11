@@ -47,12 +47,19 @@ Engineers routinely face major hurdles:
 - **📊 Embedded Materials Library & Live Formulas**:
   - Automatically exports a second Excel sheet (`Materials Library`) listing standard and harvested materials.
   - BOM uses dynamic formulas (`VLOOKUP`, `IF`, multiplication) so manual edits recalculate immediately inside Excel.
-- **🏷️ Automated Component Classification**:
-  Classifies items automatically into:
-  - **`A`** - Assembly
-  - **`C`** - Child Component / Part
-  - **`H`** - Hardware & Fasteners (Bolts, Screws, Nuts, Washers, Rivets, Studs)
-  - **`P`** - Electrical / EEE (Battery, Cell, Busbar, Wire, Cable, Connector, PCB, Harness)
+- **🏷️ Automated Component & Discipline Classification**:
+  - **Assembly / Child Part (`Assly/Child Part`)**:
+    - **`A`** - **Assembly**: Any component containing sub-assemblies or children.
+    - **`C`** - **Child Part**: Fabricated mechanical or structural detail parts.
+    - **`H`** - **Hardware & Fasteners**: Bolts, Screws, Nuts, Washers, Inserts, Rivets, Fasteners, Studs, Pins, Clips, Standoffs, Spacers.
+    - **`P`** - **Proprietary & Purchased Parts**: Bought-out / catalog electrical & electro-mechanical parts (Cells, Fuses, Connectors, Splices, Relays, Sensors, Switches, BMS, PCBs, Contactors, Plugs, Breakers, Diodes).
+  - **Discipline Category (`Category`)**:
+    - **`Mech`**: Mechanical components and structural enclosures. Smart logic ensures structural battery pack assemblies (e.g. `INSTALL BATTERY`, `BATTERY ASSEMBLY`, `CELL PACK ASSEMBLY`) and structural brackets/housings are categorized as `Mech`.
+    - **`EEE`**: Electrical & electronics components (Cells, Busbars, Wire, Cables, Connectors, Harnesses, PCBs, BMS, Shunts, Fuses, Contactors).
+- **🔬 Robust Multi-Tier Material Detection**:
+  - Performs a deep, multi-tier search across solid bodies, part prototypes, and component occurrences.
+  - Supports NX native material objects (`LocateMaterial`), enterprise Teamcenter attributes (`DB_MATERIAL`, `DB_MATERIAL_NAME`, `DB_PART_MATERIAL`), mass properties (`MASSPROP_MATERIAL`, `NX_Material`), and custom CAD attributes including **`MATERIAL1`** discovered via X-Ray diagnostics.
+  - Cleans NX material name prefixes/suffixes (e.g. `Steel:Mild` $\rightarrow$ `Steel`), concatenates multi-material bodies (`/`), and automatically synchronizes missing CAD densities against the Materials Library.
 - **🔗 Teamcenter & Native NX Compatibility**:
   Extracts `DB_PART_NO`, `DB_PART_REV`, and `DB_PART_NAME` when connected to Teamcenter. Automatically falls back to native part leaf names if working in standalone NX.
 
@@ -76,7 +83,7 @@ flowchart TD
 
 ---
 
-## 📋 Excel Output Structure (22 Columns)
+## 📋 Excel Output Structure (23 Columns)
 
 The generated Excel workbook (`NX_BOM_Staircase_Master.xls`) uses Microsoft XML Spreadsheet format, fully compatible with Microsoft Excel, LibreOffice, and Google Sheets:
 
@@ -84,21 +91,22 @@ The generated Excel workbook (`NX_BOM_Staircase_Master.xls`) uses Microsoft XML 
 |:---:|:---|:---|:---|
 | **1–6** | **Assembly Level** | Visual staircase columns (1 to 5+) | Highlighted yellow on active level |
 | **7** | **Item Name** | Component description or part title | `DB_PART_NAME` or NX DisplayName |
-| **8** | **Assly / Child Part** | Classification code (`A`, `C`, `H`, `P`) | Automatic geometry/name classifier |
-| **9** | **Category** | Discipline category (`Mech.`, `EEE`) | Automatic rule-based classifier |
+| **8** | **Assly / Child Part** | Classification code (`A`, `C`, `H`, `P`) | Automatic geometry/keyword classifier |
+| **9** | **Category** | Discipline category (`Mech`, `EEE`) | Smart rule-based classifier |
 | **10** | **Part Number** | Part number / Item ID | `DB_PART_NO` or Part Leaf |
 | **11** | **Parent Part** | Part number of the parent assembly | Structural hierarchy tracker |
 | **12** | **Qty** | Occurrence count in parent subassembly | Computed from assembly children |
-| **13** | **Volume/Part (mm³)** | Measured solid volume | NX MassProperties API |
-| **14** | **Total Volume (mm³)** | Combined volume for all instances | Excel formula: `=Qty * Volume/Part` |
-| **15** | **NX Material** | Material assigned in NX CAD | Extracted via NX `LocateMaterial` / attributes |
-| **16** | **NX Density (kg/mm³)** | Density assigned in NX CAD | CAD density or library default |
-| **17** | **Override Material** | User-selected material override | **Excel Data Validation Dropdown** |
-| **18** | **Override Density** | Custom user-entered density | Manual input cell (retained on re-runs) |
-| **19** | **Active Density** | Final density used in calculations | Excel formula: `=IF(Override Density, ..., VLOOKUP(Override Material), NX Density)` |
-| **20** | **Override Weight/Part** | Direct part weight override (e.g. Li-ion cell) | Manual input cell (retained on re-runs) |
-| **21** | **Weight/Part (kg)** | Net calculated unit weight | Excel formula: `=IF(Override Weight, ..., Active Density * Volume)` |
-| **22** | **Total Weight (kg)** | Net line-item total weight | Excel formula: `=Weight/Part * Qty` |
+| **13** | **Rev** | Part revision identifier | `DB_PART_REV` or Part Leaf revision |
+| **14** | **Volume/Part (mm³)** | Measured solid volume | NX MassProperties API |
+| **15** | **Total Volume (mm³)** | Combined volume for all instances | Excel formula: `=Qty * Volume/Part` (`=RC[-3]*RC[-1]`) |
+| **16** | **NX Material** | Material assigned in NX CAD | Multi-tier detection (`LocateMaterial` / `MATERIAL1`) |
+| **17** | **NX Density (kg/mm³)** | Density assigned in NX CAD | CAD density or library fallback |
+| **18** | **Override Material** | User-selected material override | **Excel Data Validation Dropdown** |
+| **19** | **Override Density** | Custom user-entered density | Manual input cell (retained on re-runs) |
+| **20** | **Active Density** | Final density used in calculations | Excel formula: `=IF(Override Density, ..., VLOOKUP(Override Material), NX Density)` |
+| **21** | **Override Weight/Part** | Direct part weight override (e.g. Li-ion cell) | Manual input cell (retained on re-runs) |
+| **22** | **Weight/Part (kg)** | Net calculated unit weight | Excel formula: `=IF(Override Weight, ..., Active Density * Volume)` |
+| **23** | **Total Weight (kg)** | Net line-item total weight | Excel formula: `=Weight/Part * Qty` (`=RC22*RC12`) |
 
 ---
 
@@ -118,9 +126,9 @@ The generated Excel workbook (`NX_BOM_Staircase_Master.xls`) uses Microsoft XML 
 4. Click **Run**.
 5. Monitor progress in the NX **Listing Window**:
    ```text
-   Processing BOM and extracting Geometry...
+   Processing BOM with 'MATERIAL1' extraction...
    --------------------------------------------------
-   SUCCESS! Excel BOM generated with all reference set variations.
+   SUCCESS! Excel BOM generated cleanly.
    File updated: C:\Users\<Username>\Desktop\NX_BOM_Staircase_Master.xls
    --------------------------------------------------
    ```
@@ -150,7 +158,8 @@ DEFAULT_MATERIALS = {
     "STEEL (MILD / CARBON)": 0.00000785,
     "STAINLESS STEEL 304":   0.00000800,
     "ALUMINUM 6061":         0.00000270,
-    "BRASS / FREE CUTTING":  0.00000847,
+    "ADC12":                 0.00000270,
+    "BRASS / FREE CUTTING BRASS": 0.00000847,
     "COPPER":                0.00000896,
     "ABS PLASTIC":           0.00000105,
     "NYLON (PA6)":           0.00000114,
@@ -166,9 +175,14 @@ DEFAULT_MATERIALS = {
 | **Steel (Mild)** | 7.85 | 7,850 | `0.00000785` |
 | **Stainless Steel 304** | 8.00 | 8,000 | `0.00000800` |
 | **Aluminum 6061** | 2.70 | 2,700 | `0.00000270` |
+| **ADC12 (Die Cast Al)** | 2.70 | 2,700 | `0.00000270` |
+| **Brass / Free Cutting** | 8.47 | 8,470 | `0.00000847` |
 | **Copper** | 8.96 | 8,960 | `0.00000896` |
 | **ABS Plastic** | 1.05 | 1,050 | `0.00000105` |
 | **Nylon (PA6)** | 1.14 | 1,140 | `0.00000114` |
+| **Polycarbonate (PC)** | 1.20 | 1,200 | `0.00000120` |
+| **POM (Delrin / Acetal)** | 1.42 | 1,420 | `0.00000142` |
+| **Rubber / EPDM** | 1.15 | 1,150 | `0.00000115` |
 
 ---
 

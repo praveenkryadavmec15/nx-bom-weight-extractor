@@ -1,13 +1,3 @@
-"""
-Siemens NX & Teamcenter BOM and Weight Extractor (NX Journal)
-============================================================
-Automated Bill of Materials (BOM) hierarchy extraction and mass/volume calculator
-with two-way persistent Excel overrides and zero external dependencies.
-
-Compatible with Siemens NX (NX 11 through NX 2406+) and Teamcenter / Native NX.
-Runs on native Python bundled with Siemens NX.
-"""
-
 import os
 import datetime
 import xml.etree.ElementTree as ET
@@ -17,13 +7,13 @@ import NXOpen.UF
 XML_EXCEL_NAME = "NX_BOM_Staircase_Master.xls"
 INCLUDE_REVISION_IN_TITLE = True
 
-# Updated to include all case and delimiter variations of your reference sets
 TARGET_REFSETS = ["Ahead Model", "AHEAD_MODEL", "AHEAD MODEL", "MODEL"]
 
 DEFAULT_MATERIALS = {
     "STEEL (MILD / CARBON)": 0.00000785,
     "STAINLESS STEEL 304": 0.00000800,
     "ALUMINUM 6061": 0.00000270,
+    "ADC12": 0.00000270,
     "BRASS / FREE CUTTING BRASS": 0.00000847,
     "COPPER": 0.00000896,
     "ABS PLASTIC": 0.00000105,
@@ -37,6 +27,39 @@ def clean_material_name(raw_name):
     if not raw_name: return ""
     parts = [p.strip() for p in raw_name.split(":")]
     return parts[0]
+
+def classify_component(name, is_assembly):
+    """
+    Mutually exclusive classification:
+    1. Assly/Child Part: A (Assembly), H (Hardware), P (Proprietary), C (Child Part)
+    2. Category: Mech or EEE
+    """
+    uname = name.upper()
+
+    # --- Assly/Child Part Classification ---
+    if is_assembly:
+        assly_code = "A"
+    elif any(h in uname for h in ["BOLT", "SCREW", "NUT", "WASHER", "INSERT", "RIVET", "FASTENER", "STUD", "PIN", "CLIP", "STANDOFF", "SPACER"]):
+        assly_code = "H"
+    elif any(p in uname for p in ["CELL", "FUSE", "CONNECTOR", "CONN ", "CONN_", "SPLICE", "RELAY", "SENSOR", "SWITCH", "BMS", "PCB", "CONTACTOR", "PLUG", "BREAKER", "DIODE"]):
+        assly_code = "P"
+    else:
+        assly_code = "C"
+
+    # --- Category Classification (Mech vs EEE) ---
+    is_mech_structural = any(m in uname for m in ["HOUSING", "BRACKET", "HOLDER", "COVER", "TAPE", "TRAY", "BASE", "GASKET", "SEAL", "FOAM", "CARRIER PLATE"])
+    has_electrical_override = any(e in uname for e in ["BUSBAR", "PCB", "CABLE", "WIRE", "CONN", "TERMINAL", "CELL", "TAB CELL", "FUSE", "BMS", "SHUNT"])
+
+    if is_mech_structural and not has_electrical_override:
+        category = "Mech"
+    elif any(b in uname for b in ["INSTALL BATTERY", "BATTERY ASSEMBLY", "ASSEMBLY BATTERY", "CELL PACK ASSEMBLY"]):
+        category = "Mech"
+    elif any(e in uname for e in ["BATTERY", "CELL", "BUSBAR", "WIRE", "CABLE", "CONN", "SPLICE", "TERMINAL", "PCB", "HARNESS", "FUSE", "BMS", "RELAY", "CONTACTOR", "SHUNT", "ELECTRICAL", "TAB CELL"]):
+        category = "EEE"
+    else:
+        category = "Mech"
+
+    return assly_code, category
 
 def backup_and_read_existing(filepath):
     saved_order = []
@@ -56,6 +79,7 @@ def backup_and_read_existing(filepath):
             for ws in root:
                 ws_name = ws.attrib.get('{urn:schemas-microsoft-com:office:spreadsheet}Name', '')
                 
+                # Parse Materials Library
                 if ws_name == 'Materials Library':
                     for child in ws:
                         if child.tag.endswith('Table'):
@@ -67,6 +91,9 @@ def backup_and_read_existing(filepath):
                                     if not cell.tag.endswith('Cell'): continue
                                     idx_attr = next((v for k,v in cell.attrib.items() if k.endswith('Index')), None)
                                     if idx_attr: c_idx = int(idx_attr)
+                                    merge_attr = next((v for k,v in cell.attrib.items() if k.endswith('MergeAcross')), None)
+                                    merge_span = int(merge_attr) if merge_attr else 0
+                                    
                                     val = ""
                                     for data in cell:
                                         if data.tag.endswith('Data'):
@@ -74,36 +101,53 @@ def backup_and_read_existing(filepath):
                                             break
                                     if c_idx == 1: m_name = val.strip()
                                     if c_idx == 2: m_den = val.strip()
-                                    c_idx += 1
+                                    c_idx += (1 + merge_span)
+                                    
                                 if m_name and m_name != "Material Name":
-                                    try:
-                                        existing_mat_lib[m_name] = float(m_den)
-                                    except:
-                                        pass
+                                    try: existing_mat_lib[m_name] = float(m_den)
+                                    except: pass
 
+                # Parse BOM Sheet
                 if ws_name == 'BOM':
+                    pno_col, mat_ov_col, den_ov_col, wt_ov_col = 10, 18, 19, 21 
+                    
                     for child in ws:
                         if child.tag.endswith('Table'):
                             for row in child:
                                 if not row.tag.endswith('Row'): continue
                                 col_idx = 1
-                                pno, mat_ov, den_ov, wt_ov = "", "", "", ""
+                                row_data = {}
+                                
                                 for cell in row:
                                     if not cell.tag.endswith('Cell'): continue
                                     idx_attr = next((v for k,v in cell.attrib.items() if k.endswith('Index')), None)
                                     if idx_attr: col_idx = int(idx_attr)
+                                    
+                                    merge_attr = next((v for k,v in cell.attrib.items() if k.endswith('MergeAcross')), None)
+                                    merge_span = int(merge_attr) if merge_attr else 0
+                                    
                                     val = ""
                                     for data in cell:
                                         if data.tag.endswith('Data'):
                                             val = data.text if data.text else ""
                                             break
-                                    if col_idx == 10: pno = val.strip()
-                                    if col_idx == 17: mat_ov = val.strip()
-                                    if col_idx == 18: den_ov = val.strip()
-                                    if col_idx == 20: wt_ov = val.strip()
-                                    col_idx += 1
+                                    row_data[col_idx] = val.strip()
+                                    col_idx += (1 + merge_span)
 
+                                if "Part Number" in row_data.values():
+                                    for k, v in row_data.items():
+                                        if "Part Number" in v: pno_col = k
+                                        if "Override Material" in v: mat_ov_col = k
+                                        if "Override Density" in v: den_ov_col = k
+                                        if "Override Weight" in v: wt_ov_col = k
+                                    continue
+
+                                pno = row_data.get(pno_col, "")
                                 if pno and pno != "Part Number":
+                                    mat_ov = row_data.get(mat_ov_col, "")
+                                    den_ov = row_data.get(den_ov_col, "")
+                                    wt_ov  = row_data.get(wt_ov_col, "")
+
                                     pno_counts[pno] = pno_counts.get(pno, 0) + 1
                                     instance_key = f"{pno}_{pno_counts[pno]}"
                                     saved_order.append(instance_key)
@@ -139,9 +183,12 @@ def get_item_and_rev(part_obj):
     if not pno:
         leaf = part_obj.Leaf.strip()
         if "/" in leaf:
-            pno, rev = leaf.split("/")[0].strip(), leaf.split("/")[1].strip()
+            parts = leaf.split("/")
+            pno = parts[0].strip()
+            rev = parts[1].strip() if len(parts) > 1 else ""
         elif len(leaf) >= 10 and leaf[-2:].isdigit():
-            pno, rev = leaf[:-2], leaf[-2:]
+            pno = leaf[:-2]
+            rev = leaf[-2:]
         else:
             pno = leaf
     return pno, rev
@@ -155,10 +202,6 @@ def get_cleaned_comp_number(child):
     return raw.split("/")[0].strip() if "/" in raw else raw.strip()
 
 def get_target_bodies(part_obj, session):
-    """
-    Checks reference sets supporting AHEAD_MODEL, AHEAD MODEL, and MODEL.
-    Falls back to unblanked solid bodies if no reference sets match.
-    """
     bodies = []
     matched_rs = None
     
@@ -203,13 +246,35 @@ def get_material(uf_session, session, obj):
     except: pass
     return ""
 
-def classify_component(name, is_assembly, has_geometry):
-    uname = name.upper()
-    if is_assembly and not has_geometry: return "A", "Mech."
-    if any(h in uname for h in ["BOLT", "SCREW", "NUT", "WASHER", "INSERT", "RIVET", "FASTENER", "STUD"]): return "H", "Mech."
-    if any(e in uname for e in ["BATTERY", "CELL", "BUSBAR", "WIRE", "CABLE", "CONN", "SPLICE", "TERMINAL", "PCB", "HARNESS", "EEE"]): return "P", "EEE"
-    if is_assembly: return "A", "Mech."
-    return "C", "Mech."
+def get_material_from_attributes(nx_obj):
+    """Deep search for text-based material attributes across common aliases including 'MATERIAL1'."""
+    if not nx_obj: return ""
+    
+    attrs_to_check = [
+        "MATERIAL1", "Material1", "material1", # Added per X-Ray diagnostics
+        "Material", "MATERIAL", "material",
+        "DB_MATERIAL", "DB_MATERIAL_NAME",
+        "Material Name", "MATERIAL NAME",
+        "NX_Material", "NX_MATERIAL",
+        "MASSPROP_MATERIAL",
+        "DB_PART_MATERIAL",
+        "Matl", "MATL"
+    ]
+    
+    for attr in attrs_to_check:
+        try:
+            val = nx_obj.GetUserAttributeAsString(attr, NXOpen.NXObject.AttributeType.String, -1).strip()
+            if val: return val
+        except:
+            pass
+            
+        try:
+            val = nx_obj.GetStringAttribute(attr).strip()
+            if val: return val
+        except:
+            pass
+            
+    return ""
 
 def measure_geometry(child, work_part, session, uf_session):
     proto = child.Prototype
@@ -218,9 +283,9 @@ def measure_geometry(child, work_part, session, uf_session):
         except: pass
         proto = child.Prototype
 
-    comp_name, part_no = "", ""
+    comp_name, part_no, rev_id = "", "", ""
     if proto:
-        part_no, _ = get_item_and_rev(proto)
+        part_no, rev_id = get_item_and_rev(proto)
         try: comp_name = proto.GetUserAttributeAsString("DB_PART_NAME", NXOpen.NXObject.AttributeType.String, -1).strip()
         except: pass
 
@@ -252,28 +317,36 @@ def measure_geometry(child, work_part, session, uf_session):
             
             for b in bodies:
                 m = get_material(uf_session, session, b)
+                if not m: m = get_material_from_attributes(b)
                 if m:
                     m = clean_material_name(m)
                     if m not in dmats: dmats.append(m)
         
         if not dmats:
             m = get_material(uf_session, session, proto)
+            if not m: m = get_material_from_attributes(proto)
             if m:
                 m = clean_material_name(m)
                 if m not in dmats: dmats.append(m)
-            
+                
         if not dmats:
-            for attr in ["Material", "DB_MATERIAL"]:
-                try:
-                    m = proto.GetUserAttributeAsString(attr, NXOpen.NXObject.AttributeType.String, -1).strip()
-                    if m:
-                        m = clean_material_name(m)
-                        if m not in dmats: dmats.append(m)
-                except: pass
+            m = get_material_from_attributes(child)
+            if m:
+                m = clean_material_name(m)
+                if m not in dmats: dmats.append(m)
 
         m_name = "/".join(dmats) if dmats else ""
 
-    return {"name": comp_name, "part_no": part_no, "has_geometry": has_g, "volume": vol, "mass": mass, "density": den, "material": m_name}
+    return {
+        "name": comp_name,
+        "part_no": part_no,
+        "rev": rev_id,
+        "has_geometry": has_g,
+        "volume": vol,
+        "mass": mass,
+        "density": den,
+        "material": m_name
+    }
 
 def process_level(parent_comp, level, parent_id, rows, work_part, session, uf_session):
     children = parent_comp.GetChildren()
@@ -296,12 +369,20 @@ def process_level(parent_comp, level, parent_id, rows, work_part, session, uf_se
         sub_children = rep.GetChildren()
         is_assembly = (sub_children is not None and len(sub_children) > 0)
         geom = measure_geometry(rep, work_part, session, uf_session)
-        assly_type, cat = classify_component(geom["name"], is_assembly, geom["has_geometry"])
+        assly_type, cat = classify_component(geom["name"], is_assembly)
 
         rows.append({
-            "level": level, "name": geom["name"], "part_no": geom["part_no"],
-            "parent_id": parent_id, "assly_code": assly_type, "category": cat,
-            "qty": len(group), "volume": geom["volume"], "nx_material": geom["material"], "nx_density": geom["density"]
+            "level": level,
+            "name": geom["name"],
+            "part_no": geom["part_no"],
+            "rev": geom["rev"],
+            "parent_id": parent_id,
+            "assly_code": assly_type,
+            "category": cat,
+            "qty": len(group),
+            "volume": geom["volume"],
+            "nx_material": geom["material"],
+            "nx_density": geom["density"]
         })
 
         if is_assembly:
@@ -318,7 +399,7 @@ def main():
         return
 
     session.ListingWindow.Open()
-    session.ListingWindow.WriteLine("Processing BOM and extracting Geometry...")
+    session.ListingWindow.WriteLine("Processing BOM with 'MATERIAL1' extraction...")
 
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
     excel_path = os.path.join(desktop, XML_EXCEL_NAME)
@@ -416,17 +497,18 @@ def main():
         '   <Column ss:Index="10" ss:Width="100"/>',
         '   <Column ss:Index="11" ss:Width="100"/>',
         '   <Column ss:Index="12" ss:Width="45"/>',
-        '   <Column ss:Index="13" ss:Width="95"/>',
+        '   <Column ss:Index="13" ss:Width="45"/>',
         '   <Column ss:Index="14" ss:Width="95"/>',
-        '   <Column ss:Index="15" ss:Width="110"/>',
-        '   <Column ss:Index="16" ss:Width="95"/>',
-        '   <Column ss:Index="17" ss:Width="110"/>',
-        '   <Column ss:Index="18" ss:Width="95"/>',
+        '   <Column ss:Index="15" ss:Width="95"/>',
+        '   <Column ss:Index="16" ss:Width="110"/>',
+        '   <Column ss:Index="17" ss:Width="95"/>',
+        '   <Column ss:Index="18" ss:Width="110"/>',
         '   <Column ss:Index="19" ss:Width="95"/>',
-        '   <Column ss:Index="20" ss:Width="100"/>',
-        '   <Column ss:Index="21" ss:Width="85"/>',
+        '   <Column ss:Index="20" ss:Width="95"/>',
+        '   <Column ss:Index="21" ss:Width="100"/>',
         '   <Column ss:Index="22" ss:Width="85"/>',
-        f'   <Row ss:Height="24"><Cell ss:Index="1" ss:MergeAcross="21" ss:StyleID="sBanner"><Data ss:Type="String">{banner_title}</Data></Cell></Row>',
+        '   <Column ss:Index="23" ss:Width="85"/>',
+        f'   <Row ss:Height="24"><Cell ss:Index="1" ss:MergeAcross="22" ss:StyleID="sBanner"><Data ss:Type="String">{banner_title}</Data></Cell></Row>',
         '   <Row ss:Height="28">',
         '    <Cell ss:Index="1" ss:MergeAcross="5" ss:StyleID="sNavyHeader"><Data ss:Type="String">Assembly level</Data></Cell>',
         '    <Cell ss:Index="7" ss:StyleID="sNavyHeader"><Data ss:Type="String">Item Name</Data></Cell>',
@@ -435,16 +517,17 @@ def main():
         '    <Cell ss:Index="10" ss:StyleID="sNavyHeader"><Data ss:Type="String">Part Number</Data></Cell>',
         '    <Cell ss:Index="11" ss:StyleID="sNavyHeader"><Data ss:Type="String">Parent Part</Data></Cell>',
         '    <Cell ss:Index="12" ss:StyleID="sNavyHeader"><Data ss:Type="String">Qty</Data></Cell>',
-        '    <Cell ss:Index="13" ss:StyleID="sNavyHeader"><Data ss:Type="String">Volume/Part&#10;(mm3)</Data></Cell>',
-        '    <Cell ss:Index="14" ss:StyleID="sNavyHeader"><Data ss:Type="String">Total Volume&#10;(mm3)</Data></Cell>',
-        '    <Cell ss:Index="15" ss:StyleID="sNavyHeader"><Data ss:Type="String">NX Material</Data></Cell>',
-        '    <Cell ss:Index="16" ss:StyleID="sNavyHeader"><Data ss:Type="String">NX Density&#10;(kg/mm3)</Data></Cell>',
-        '    <Cell ss:Index="17" ss:StyleID="sNavyHeader"><Data ss:Type="String">Override Material</Data></Cell>',
-        '    <Cell ss:Index="18" ss:StyleID="sNavyHeader"><Data ss:Type="String">Override Density&#10;(kg/mm3)</Data></Cell>',
-        '    <Cell ss:Index="19" ss:StyleID="sNavyHeader"><Data ss:Type="String">Active Density&#10;(kg/mm3)</Data></Cell>',
-        '    <Cell ss:Index="20" ss:StyleID="sNavyHeader"><Data ss:Type="String">Override Weight/&#10;Part (kg)</Data></Cell>',
-        '    <Cell ss:Index="21" ss:StyleID="sNavyHeader"><Data ss:Type="String">Weight/Part&#10;(kg)</Data></Cell>',
-        '    <Cell ss:Index="22" ss:StyleID="sNavyHeader"><Data ss:Type="String">Total Weight&#10;(kg)</Data></Cell>',
+        '    <Cell ss:Index="13" ss:StyleID="sNavyHeader"><Data ss:Type="String">Rev</Data></Cell>',
+        '    <Cell ss:Index="14" ss:StyleID="sNavyHeader"><Data ss:Type="String">Volume/Part&#10;(mm3)</Data></Cell>',
+        '    <Cell ss:Index="15" ss:StyleID="sNavyHeader"><Data ss:Type="String">Total Volume&#10;(mm3)</Data></Cell>',
+        '    <Cell ss:Index="16" ss:StyleID="sNavyHeader"><Data ss:Type="String">NX Material</Data></Cell>',
+        '    <Cell ss:Index="17" ss:StyleID="sNavyHeader"><Data ss:Type="String">NX Density&#10;(kg/mm3)</Data></Cell>',
+        '    <Cell ss:Index="18" ss:StyleID="sNavyHeader"><Data ss:Type="String">Override Material</Data></Cell>',
+        '    <Cell ss:Index="19" ss:StyleID="sNavyHeader"><Data ss:Type="String">Override Density&#10;(kg/mm3)</Data></Cell>',
+        '    <Cell ss:Index="20" ss:StyleID="sNavyHeader"><Data ss:Type="String">Active Density&#10;(kg/mm3)</Data></Cell>',
+        '    <Cell ss:Index="21" ss:StyleID="sNavyHeader"><Data ss:Type="String">Override Weight/&#10;Part (kg)</Data></Cell>',
+        '    <Cell ss:Index="22" ss:StyleID="sNavyHeader"><Data ss:Type="String">Weight/Part&#10;(kg)</Data></Cell>',
+        '    <Cell ss:Index="23" ss:StyleID="sNavyHeader"><Data ss:Type="String">Total Weight&#10;(kg)</Data></Cell>',
         '   </Row>'
     ]
 
@@ -463,9 +546,10 @@ def main():
         row_cells.append(f'<Cell ss:StyleID="sCenter"><Data ss:Type="String">{r["part_no"]}</Data></Cell>')
         row_cells.append(f'<Cell ss:StyleID="sCenter"><Data ss:Type="String">{r["parent_id"]}</Data></Cell>')
         row_cells.append(f'<Cell ss:StyleID="sCenter"><Data ss:Type="Number">{r["qty"]}</Data></Cell>')
+        row_cells.append(f'<Cell ss:StyleID="sCenter"><Data ss:Type="String">{r["rev"]}</Data></Cell>')
         row_cells.append(f'<Cell ss:StyleID="sDecimal"><Data ss:Type="Number">{r["volume"]:.4f}</Data></Cell>')
         
-        row_cells.append('<Cell ss:StyleID="sDecimal" ss:Formula="=RC[-2]*RC[-1]"/>')
+        row_cells.append('<Cell ss:StyleID="sDecimal" ss:Formula="=RC[-3]*RC[-1]"/>')
         row_cells.append(f'<Cell ss:StyleID="sLeft"><Data ss:Type="String">{r["nx_material"]}</Data></Cell>')
         row_cells.append(f'<Cell ss:StyleID="sDensity"><Data ss:Type="Number">{r["nx_density"]:.8f}</Data></Cell>')
 
@@ -477,16 +561,17 @@ def main():
 
         row_cells.append(f'<Cell ss:StyleID="sLeft"><Data ss:Type="String">{ov_mat}</Data></Cell>' if ov_mat else '<Cell ss:StyleID="sLeft"/>')
         row_cells.append(f'<Cell ss:StyleID="sDensity"><Data ss:Type="Number">{ov_den}</Data></Cell>' if ov_den else '<Cell ss:StyleID="sDensity"/>')
-        row_cells.append('<Cell ss:StyleID="sDensity" ss:Formula="=IF(ISNUMBER(RC18),IF(RC18&gt;0,RC18,RC16),IF(ISNA(VLOOKUP(RC17,MatLookupTable,2,FALSE)),RC16,VLOOKUP(RC17,MatLookupTable,2,FALSE)))"/>')
+        
+        row_cells.append('<Cell ss:StyleID="sDensity" ss:Formula="=IF(ISNUMBER(RC19),IF(RC19&gt;0,RC19,RC17),IF(ISNA(VLOOKUP(RC18,MatLookupTable,2,FALSE)),RC17,VLOOKUP(RC18,MatLookupTable,2,FALSE)))"/>')
         row_cells.append(f'<Cell ss:StyleID="sWeight"><Data ss:Type="Number">{ov_wt}</Data></Cell>' if ov_wt else '<Cell ss:StyleID="sWeight"/>')
-        row_cells.append('<Cell ss:StyleID="sWeight" ss:Formula="=IF(ISNUMBER(RC20),IF(RC20&gt;0,RC20,RC19*RC13),RC19*RC13)"/>')
-        row_cells.append('<Cell ss:StyleID="sWeight" ss:Formula="=RC21*RC12"/>')
+        row_cells.append('<Cell ss:StyleID="sWeight" ss:Formula="=IF(ISNUMBER(RC21),IF(RC21&gt;0,RC21,RC20*RC14),RC20*RC14)"/>')
+        row_cells.append('<Cell ss:StyleID="sWeight" ss:Formula="=RC22*RC12"/>')
         xml.append('   <Row>' + "".join(row_cells) + '</Row>')
 
     xml.extend([
         '  </Table>',
         '  <DataValidation xmlns="urn:schemas-microsoft-com:office:excel">',
-        '   <Range>R5C17:R10000C17</Range>',
+        '   <Range>R3C18:R10000C18</Range>',
         '   <Type>List</Type>',
         '   <Value>=MatDropdownList</Value>',
         '  </DataValidation>',
@@ -510,7 +595,7 @@ def main():
         f.write("\n".join(xml))
 
     session.ListingWindow.WriteLine("--------------------------------------------------")
-    session.ListingWindow.WriteLine("SUCCESS! Excel BOM generated with all reference set variations.")
+    session.ListingWindow.WriteLine("SUCCESS! Excel BOM generated cleanly.")
     session.ListingWindow.WriteLine(f"File updated: {excel_path}")
     session.ListingWindow.WriteLine("--------------------------------------------------")
 
